@@ -1,0 +1,32 @@
+Sub open_fcff_os()
+    Dim FolderPath As String
+    Dim WbName As String
+    Dim FileNumber As Integer
+    Dim SheetNames As Variant
+    
+    FolderPath = ActiveSheet.Range("A2") & "\"
+    FileNumber = ActiveSheet.Range("A5")
+
+    SheetNames = Array("Ins OS", "KPIs OS", "BS OS", "FCFF OS")
+    
+    For x = 1 To FileNumber
+        WbName = ActiveSheet.Range("C1").Offset(x, 0)
+        Workbooks.Open Filename:=(FolderPath & WbName & ".xlsx"), UpdateLinks:=0
+
+        For Each Sheet In SheetNames
+           With Sheets(Sheet)
+            .Move Before:=Sheets(1)
+            .Activate
+           End With
+           ActiveWindow.ScrollRow = 1
+	   ActiveWindow.ScrollColumn = 1
+        Next
+        
+        Workbooks(WbName).Sheets("FCFF OS").Activate
+        
+        Workbooks(WbName).Save
+        Workbooks(WbName).Close
+    Next
+    
+End Sub
+

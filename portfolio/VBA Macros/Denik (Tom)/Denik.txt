@@ -1,0 +1,103 @@
+Sub Denik()
+    Sheets(2).Activate
+    Sheets(2).Name = "Source"
+    
+    Dim i As Integer, rngData As Range
+    Set rngData = Range("A1").CurrentRegion
+    i = Application.WorksheetFunction.Match("Ucet hlavni knihy", Range("A1:AZ1"), 0)
+    ActiveSheet.ListObjects("Table").Range.AutoFilter Field:=i, Criteria1:= _
+        "<>221*", Operator:=xlAnd, Criteria2:="<>211*"
+        
+    Range("Table").Select
+    Range("A3").Activate
+    Selection.ClearContents
+    
+    i = Application.WorksheetFunction.Match("Ucet hlavni knihy", Range("A1:AZ1"), 0)
+    ActiveSheet.ListObjects("Table").Range.AutoFilter Field:=i, Criteria1:= _
+        "=221*", Operator:=xlOr, Criteria2:="=211*"
+      
+    Dim newColNum As Integer
+    newColNum = Range("Table[[#Headers],[Popis]]").Column
+    Selection.ListObject.ListColumns.Add Position:=newColNum
+    
+    Range("A1").Offset(0, newColNum - 1).Select
+    ActiveCell.FormulaR1C1 = "Priznak"
+    
+    Range("Table[[#Headers],[Priznak]]").Offset(1, 0).Select
+    Selection.NumberFormat = "General"
+    ActiveCell.FormulaR1C1 = "=LEFT([@Popis],2)"
+    
+    Range("Table[#All]").Select
+    Range("Table[[#Headers],[Castka]]").Activate
+    Application.CutCopyMode = False
+    Sheets.Add(After:=ActiveSheet).Name = "Pivot"
+    
+    ActiveWorkbook.PivotCaches.Create(SourceType:=xlDatabase, SourceData:= _
+        "Table", Version:=8).CreatePivotTable TableDestination:="Pivot!R3C1", _
+        TableName:="Pivot", DefaultVersion:=8
+        
+    Sheets("Pivot").Select
+    Cells(3, 1).Select
+    
+    With ActiveSheet.PivotTables("Pivot")
+        .ColumnGrand = True
+        .HasAutoFormat = True
+        .DisplayErrorString = False
+        .DisplayNullString = True
+        .EnableDrilldown = True
+        .ErrorString = ""
+        .MergeLabels = False
+        .NullString = ""
+        .PageFieldOrder = 2
+        .PageFieldWrapCount = 0
+        .PreserveFormatting = True
+        .RowGrand = True
+        .SaveData = True
+        .PrintTitles = False
+        .RepeatItemsOnEachPrintedPage = True
+        .TotalsAnnotation = False
+        .CompactRowIndent = 1
+        .InGridDropZones = False
+        .DisplayFieldCaptions = True
+        .DisplayMemberPropertyTooltips = False
+        .DisplayContextTooltips = True
+        .ShowDrillIndicators = True
+        .PrintDrillIndicators = False
+        .AllowMultipleFilters = False
+        .SortUsingCustomLists = True
+        .FieldListSortAscending = False
+        .ShowValuesRow = False
+        .CalculatedMembersInFilters = False
+        .RowAxisLayout xlCompactRow
+    End With
+    
+    With ActiveSheet.PivotTables("Pivot").PivotCache
+        .RefreshOnFileOpen = False
+        .MissingItemsLimit = xlMissingItemsDefault
+    End With
+    
+    ActiveSheet.PivotTables("Pivot").RepeatAllLabels xlRepeatLabels
+    
+    With ActiveSheet.PivotTables("Pivot").PivotFields("Datum")
+        .Orientation = xlRowField
+        .Position = 1
+    End With
+    
+    ActiveSheet.PivotTables("Pivot").PivotFields("Datum").AutoGroup
+    ActiveSheet.PivotTables("Pivot").PivotFields("Datum").Orientation = _
+        xlHidden
+        
+    With ActiveSheet.PivotTables("Pivot").PivotFields("Priznak")
+        .Orientation = xlRowField
+        .Position = 2
+    End With
+    
+    With ActiveSheet.PivotTables("Pivot").PivotFields("Popis")
+        .Orientation = xlRowField
+        .Position = 3
+    End With
+    
+    ActiveSheet.PivotTables("Pivot").AddDataField ActiveSheet.PivotTables( _
+        "Pivot").PivotFields("Castka"), "Sum of Castka", xlSum
+        
+End Sub

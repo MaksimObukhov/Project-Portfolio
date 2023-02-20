@@ -1,0 +1,118 @@
+Sub PivotTableMacro()
+    'Declare Variables
+    Dim PSheet As Worksheet
+    Dim DSheet As Worksheet
+    Dim PCache As PivotCache
+    Dim PTable As PivotTable
+    Dim TableName As String
+    Dim PRange As Range
+    Dim LastRow As Long
+    Dim LastCol As Long
+    Dim SNames As Variant
+    Dim counter As Integer
+    
+    
+
+    'Add backup sheet
+    Sheets("denik").Copy After:=Sheets("denik")
+    ActiveSheet.Name = "denik backup"
+    
+    Set DSheet = Worksheets("denik")
+    
+    'Rename columns
+    DSheet.Select
+    Range("F1").Value = "Hlavni ucet"
+    Range("L1").Value = "Castka"
+    Range("S1").Value = "Typ zauctovani"
+    
+    'Define Data Range
+    LastRow = DSheet.Cells(Rows.Count, 1).End(xlUp).Row
+    LastCol = DSheet.Cells(1, Columns.Count).End(xlToLeft).Column
+    Set PRange = DSheet.Cells(1, 1).Resize(LastRow, LastCol)
+    
+    
+    SNames = Array("KZ", "OB", "EFBV", "FX", "uroky")
+    For Each SName In SNames
+        Sheets.Add(Before:=DSheet).Name = SName
+        Set PSheet = Worksheets(SName)
+        
+        For i = 1 To 2
+        
+            'Define Pivot Cache
+            Set PCache = ActiveWorkbook.PivotCaches.Create(SourceType:=xlDatabase, SourceData:=PRange)
+            
+            'Insert Blank Pivot Table
+            TName = "Pivot" & SName & i
+            Set PTable = PCache.CreatePivotTable _
+            (TableDestination:=PSheet.Cells(3, i ^ 3), TableName:=TName)
+                
+            'Enter Pivot Table
+            PSheet.Cells(3, i ^ 3).Select
+            With ActiveSheet.PivotTables(TName)
+                .ColumnGrand = True
+                .HasAutoFormat = True
+                .DisplayErrorString = False
+                .DisplayNullString = True
+                .EnableDrilldown = True
+                .ErrorString = ""
+                .MergeLabels = False
+                .NullString = ""
+                .PageFieldOrder = 2
+                .PageFieldWrapCount = 0
+                .PreserveFormatting = True
+                .RowGrand = True
+                .SaveData = True
+                .PrintTitles = False
+                .RepeatItemsOnEachPrintedPage = True
+                .TotalsAnnotation = False
+                .CompactRowIndent = 1
+                .InGridDropZones = False
+                .DisplayFieldCaptions = True
+                .DisplayMemberPropertyTooltips = False
+                .DisplayContextTooltips = True
+                .ShowDrillIndicators = True
+                .PrintDrillIndicators = False
+                .AllowMultipleFilters = False
+                .SortUsingCustomLists = True
+                .FieldListSortAscending = False
+                .ShowValuesRow = False
+                .CalculatedMembersInFilters = False
+                .RowAxisLayout xlCompactRow
+            End With
+            
+            With ActiveSheet.PivotTables(TName).PivotCache
+                .RefreshOnFileOpen = False
+                .MissingItemsLimit = xlMissingItemsDefault
+            End With
+            
+            ActiveSheet.PivotTables(TName).RepeatAllLabels xlRepeatLabels
+            
+            With ActiveSheet.PivotTables(TName).PivotFields("Typ zauctovani")
+                .Orientation = xlPageField
+                .Position = 1
+            End With
+            
+            With ActiveSheet.PivotTables(TName).PivotFields("Doklad")
+                .Orientation = xlPageField
+                .Position = 1
+            End With
+            
+            With ActiveSheet.PivotTables(TName).PivotFields("Hlavni ucet")
+                .Orientation = xlRowField
+                .Position = 1
+            End With
+            
+            With ActiveSheet.PivotTables(TName).PivotFields("Partner (Popis)")
+                .Orientation = xlRowField
+                .Position = 2
+            End With
+            
+            With ActiveSheet.PivotTables(TName).PivotFields("Castka")
+                .Orientation = xlDataField
+                .Position = 1
+                .Function = xlSum
+            End With
+        Next i
+    Next SName
+
+End Sub

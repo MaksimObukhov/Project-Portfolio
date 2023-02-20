@@ -1,0 +1,42 @@
+Sub ModelFiles()
+    Dim RepFolderPath As String
+    Dim FolderName As String
+    Dim WbName As String
+    Dim UploadName As String
+    Dim month As Integer
+    Dim ListNumber As Integer
+    
+    RepFolderPath = ActiveSheet.Range("A2") & "\"
+    ListNumber = ActiveSheet.Range("A5")
+    
+    For x = 1 To ListNumber
+        FolderName = ActiveSheet.Range("C1").Offset(x, 0) & "\"
+        WbName = ActiveSheet.Range("D1").Offset(x, 0)
+        UploadName = ActiveSheet.Range("E1").Offset(x, 0)
+        month = ActiveSheet.Range("F1").Offset(x, 0)
+              
+        Workbooks.Open Filename:=(RepFolderPath & FolderName & WbName & ".xlsx"), UpdateLinks:=0
+        Workbooks.Open Filename:=(RepFolderPath & FolderName & UploadName & ".xlsx"), UpdateLinks:=0
+        
+        With Workbooks(UploadName).Sheets(1)
+        .Range("A2:AQ999").Clear
+        .Range("A2:AQ999").Value = Workbooks(WbName).Sheets("OS-output").Range("A2:AQ999").Value
+        .Columns("A:AQ").AutoFit
+        End With
+        
+        If month > 0 Then
+            For i = 0 To month - 1
+                Range("O2:O999").Offset(0, i).ClearContents
+            Next
+        End If
+        
+        Workbooks(WbName).Save
+        Workbooks(WbName).Close
+        
+        Workbooks(UploadName).Save
+        Workbooks(UploadName).Close
+        
+    Next
+    
+End Sub
+
