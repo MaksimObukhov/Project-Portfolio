@@ -1,0 +1,343 @@
+---
+title: "Report client risk"
+output: 
+  html_document:
+    fig_width: 10
+    fig_height: 10
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, warning = F)
+```
+## Team: Maksim Obukhov, Nam Hoang
+```{r libraries, message = FALSE, warning = FALSE}
+library("scorecard")
+library("caret")
+library("data.table")
+library('ROCR')
+library('pROC')
+library('knitr')
+library('dplyr')
+library('ggplot2')
+library('plotly')
+library('ggcorrplot')
+library('woeBinning')
+```
+
+```{r data import and curring check}
+# rm(list = ls())
+df_orig <- read.csv("mortgage_sample.csv") %>% 
+  filter(sample == "public") %>% 
+  select(-sample) %>%  
+  mutate(TARGET = 0)
+
+# curing
+df_cure <- df_orig %>%
+  select(id, status_time) %>% 
+  dplyr::group_by(id) %>%
+  dplyr::summarise(sum_status = sum(status_time)) %>% 
+  filter(sum_status > 2)
+df_cure
+# no curing occurred
+```
+```{r target consctruction}
+# TARGET different approach (Nam)
+# NOT run only if .csv file unavailable
+
+df_orig <- arrange(df_orig, id, time)
+df_id <- df_orig %>% group_by(id)
+for (id in unique(df_orig$id)){
+  index <- which(df_orig$id == id)
+  if (sum(df_orig$default_time[index]) == 1){
+    last_index <- which(df_orig$default_time == 1 & df_orig$id == id)
+    if (length(index) <= 12){
+      df_orig$TARGET[(last_index-length(index)+1):last_index] <- 1
+    }
+    else {
+      df_orig$TARGET[(last_index-11):last_index] <- 1
+    }
+  }
+}
+
+# write.csv(df_orig, "df_orig_TARGET.csv", fileEncoding = "UTF-8")
+
+# df_dev <- read.csv("df_orig_TARGET.csv") %>%
+#   select(-X, -status_time, -payoff_time) %>%
+#   mutate(time_since_orig = time - orig_time,
+#          time_until_mat  = mat_time - time,
+#          loan_length = mat_time - orig_time)
+
+
+```
+
+```{r plot count of defaults by month}
+df_dev <- df_orig %>%
+        select(-status_time, -payoff_time) %>%
+        mutate(time_since_orig = time - orig_time,
+               time_until_mat  = mat_time - time,
+               loan_length = mat_time - orig_time)
+
+df_test <- df_dev %>%
+  mutate(time_since_orig = time - orig_time,
+         time_since_orig_month = time_since_orig %% 12,
+         time_month = time %% 12) %>%
+  select(id, time, time_month, time_since_orig, time_since_orig_month, TARGET)
+
+# df for a fixed cohort
+df_fix <- df_test %>%
+  filter(TARGET == 1) %>%
+  group_by(time_month) %>%
+  summarise(time_target_count = n())
+
+ggplot(df_fix, aes(x = as.factor(time_month), y = time_target_count)) +
+  geom_bar(stat = "identity", fill = "dodgerblue2") +
+  geom_text(aes(label = time_target_count, y = time_target_count),
+            position = position_stack(vjust = 0.9)) +
+  theme_light() +
+  xlab("Month")+
+  ylab("Target count")+
+  ggtitle("Fixed cohort")
+```
+
+```{r data transformation & missing values}
+# choose cohort with the most number of TARGETs
+df_dev <- df_dev %>%
+        filter(time %% 12 == 6) %>%
+        select(-default_time) %>%
+        mutate(diff_bank_time = first_time - orig_time,
+               balance_paid = balance_orig_time - balance_time)
+
+# check if we can impute values for NAs in LTV 
+IDs_with_NA <- df_dev %>% filter(is.na(LTV_time)) %>%  select(id) %>%  unique() %>% t() %>% as.vector()
+df_orig_LTV <- df_orig[df_orig$id %in% IDs_with_NA,] %>% select(id, LTV_time)
+## as for each clients id it's all NA we canť use standard imputing mechanics for time series because it only creates values in between already existing values.
+
+df_dev <- df_dev %>%  na.omit()
+summary(df_dev)
+```
+
+```{r outlier treatment, warning = FALSE}
+#columns to treat
+treat <- c("balance_time", "LTV_time", "interest_rate_time", "hpi_time",
+           "gdp_time", "balance_orig_time",
+           "FICO_orig_time", "LTV_orig_time", "Interest_Rate_orig_time",
+           "hpi_orig_time", "time_since_orig")
+
+# convert outliers into 5th and 95th quantiles values
+for (i in treat) {
+  df_toTreat <- df_dev %>% select(i)
+  max <- quantile(sort(df_toTreat[,1]), probs = 0.95)
+  min <- quantile(sort(df_toTreat[,1]), probs = 0.05)
+  df_dev[df_dev[,i]>max, i] <- max
+  df_dev[df_dev[,i]<min, i] <- min
+}
+
+rm(treat, min, max, df_toTreat, i)
+```
+
+```{r data split to train and test}
+# set seed for replication 
+set.seed(150520)
+
+df_dev <- df_dev %>% select(-orig_time, -first_time, -mat_time)
+
+sample <- sample(c(T, F), nrow(df_dev), replace=T, prob=c(0.7,0.3))
+df_train <- df_dev[sample,]
+df_test  <- df_dev[!sample,]
+rm(sample)
+```
+
+```{r Binning}
+# added because the line seemed quadratic with high IV
+df_train <- df_train %>% mutate(hpi_time2 = (hpi_time - mean(hpi_time))^2,
+                               uer_time2 = (uer_time - mean(uer_time))^2)
+
+# firstbin created to see how to adjust breakpoints for individual bins
+firstbin <- woebin(df_train, y = 'TARGET',
+                      var_skip = c('id', 'time', 'orig_time', 'first_time', 'mat_time'),
+                      save_breaks_list = 'breaks')
+woebin_plot(firstbin)
+```
+
+```{r binning adjustment and deployent}
+# form previous plots of bins creating new bins to linearize the relationship 
+breaks_adj <- source('breaks.R')$value
+breaks_adj[['balance_time']] <- c(50000,120000, 190000)
+breaks_adj[['gdp_time']] <- c(3.03, 3.37)
+breaks_adj[['uer_time']] <- c(7.3)
+breaks_adj[['balance_orig_time']] <- c(60000, 120000, 190000)
+breaks_adj[["LTV_orig_time"]] <-c(63.5, 75, 80)
+breaks_adj[['Interest_Rate_orig_time']] <- c(5.8,6.8)
+breaks_adj[['time_since_orig']] <- c(8, 23)
+breaks_adj[["diff_bank_time"]] <- c(4, 5)
+breaks_adj[["uer_time2"]] <- c(1)
+
+# save new & final bins
+bins_final <- woebin(df_train, y="TARGET",
+                    var_skip = c('id', 'time', 'orig_time', 'first_time', 'mat_time'),
+                    breaks_list=breaks_adj)
+#plot them to see
+woebin_plot(bins_final)
+```
+
+```{r correlation}
+# preparing dataframe to calculate correlation betweend predictors. Don't need to check IDs for correlation
+df_cor <- df_train %>% select(-id, -time)
+
+# correlation matrix for the rest of the columns and their P-values
+cor_mat <- cor(df_cor, method = "spearman") %>% round(2) %>% as.data.frame()
+p_mat <- cor_pmat(cor_mat)
+
+#printing table to see pairs that strognly correlate with each other
+cor_pairs <- which(abs(cor_mat) > 0.4 & upper.tri(cor_mat, diag = FALSE), arr.ind = TRUE)
+df_cor_table <- data.frame()
+
+# Print column names for each pair
+for (i in 1:nrow(cor_pairs)) {
+  col1 <- colnames(cor_mat)[cor_pairs[i, 1]]
+  col2 <- colnames(cor_mat)[cor_pairs[i, 2]]
+  df_cor_table[i, "columns"] <- paste0(col1, " | ", col2)
+  df_cor_table[i, "corelation"] <- paste0(round(cor_mat[cor_pairs[i, 1], cor_pairs[i, 2]], 2))
+  P_val <- p_mat[cor_pairs[i, 1], cor_pairs[i, 2]]
+  df_cor_table[i, "P_value (%)"] <- round(P_val*100, 3)
+  if (P_val <= 0.001){df_cor_table[i,"significance"] = "***"}
+  else if (P_val <= 0.01){df_cor_table[i,"significance"] = "**"}
+  else if (P_val <= 0.05){df_cor_table[i,"significance"] = "*"}
+  else if (P_val <= 0.1) {df_cor_table[i,"significance"] = "."}
+  else {{df_cor_table[i,"significance"] = ""}}
+}
+
+rm(i, col1,col2, P_val, df_cor, cor_mat, p_mat, cor_pairs)
+kable(df_cor_table, align = c("l", "r","r"))
+```
+
+```{r predictor choice}
+# sort predictors by IV to know order of selection 
+IVs <- data.frame()
+for (i in labels(bins_final)){
+  IVs[i, 1] <- bins_final[[i]][1, "total_iv"]
+}
+IVs <- IVs %>% filter(total_iv > 0.05) %>% arrange_all()
+IVs
+# - hpi_time2 couldn't make the relationship linear
+# + uer_time2 
+# + balance_paid
+# - time_since_orig & time_until_mat correlates to balance_paid
+# + LTV_time 
+# - hpi_orig_time correlates to LTV_time
+# + interest_rate_time 
+# + hpi_time
+# - uer_time correlates to hpi_time
+# - FICO_orig_time correlates to interest_rate_time
+# - gdp-time low P value 
+# - LTV_orig_time correlates to LTV_time
+# - diff_bank_time - low P value 
+# + loan_length
+# - IR_orig_time correlates to interest_rate_time
+# + balance_time
+# - balance_orig_time correlates to balance_time
+pred <- c("uer_time2", "balance_paid", "LTV_time", "interest_rate_time", "hpi_time", "loan_length", "balance_time")
+pred <- paste(pred, 'woe', sep = '_')
+
+#binning train dataframe
+df_binned_train <- woebin_ply(df_train, bins_final, to = "woe", no_cores = 2, print_step = 0L,
+  replace_blank_inf = T)
+df_binned_train <- df_binned_train %>% select(pred, TARGET)
+
+#binning test dataframe
+df_test <- df_test %>% 
+  mutate(hpi_time2 = (hpi_time - mean(hpi_time))^2,
+         uer_time2 = (uer_time - mean(uer_time))^2)
+df_binned_test<- woebin_ply(df_test , bins_final, to = "woe", no_cores = 2, print_step = 0L,
+                            replace_blank_inf = T)
+df_binned_test <- df_binned_test %>% select(id,pred, TARGET)
+rm(pred, i, IVs, df_cor_table, firstbin)
+```
+
+```{r model}
+# estimating logistic regression on binned training data
+model <- glm(TARGET ~ ., family = binomial(link = "logit"), data = df_binned_train)
+summary(model)
+```
+
+```{r threshold}
+### Using ROCR library to see where the threshold should be
+predictTrain <- predict(model, newdata = df_binned_test, type="response")
+ROCRpred <- prediction(predictTrain, df_binned_test$TARGET)
+ROCRperf <- performance(ROCRpred, "tpr", "fpr")
+
+plot(ROCRperf, colorize=TRUE, print.cutoffs.at=seq(0,1, by=0.05), text.adj=c(-0.2, 1.7))
+rm(predictTrain, ROCRpred, ROCRperf)
+```
+
+```{r test}
+# calculating model probabilities and predictions on test data 
+test <- df_binned_test %>%  select(id, TARGET)
+test$model_prob <- predict(model, df_binned_test, type = "response")
+test <- test %>% mutate(model_pred = 1*(model_prob > .215) + 0)
+
+# calculating confusion matrix (irrelevant as we are using scores)
+lvs <- c("payoff", "default") 
+truth <- factor(rep(lvs, times = c(sum(test$TARGET ==0), sum(test$TARGET ==1))),
+                levels = rev(lvs))
+pred <- factor(c(rep(lvs, times = c(sum((test$TARGET ==0 & test$model_pred ==0)),
+                                    sum((test$TARGET ==0 & test$model_pred ==1)))),
+                 rep(lvs, times = c(sum((test$TARGET ==1 & test$model_pred ==0)),
+                                    sum((test$TARGET ==1 & test$model_pred ==1))))),
+               levels = rev(lvs))
+
+confusionMatrix(pred, truth)
+rm(lvs, truth, pred)
+```
+
+```{r GINI}
+#AUC score
+roc_score <- roc(df_test$TARGET, test$model_pred)
+
+# roc score
+print(roc_score$auc)
+
+# calculate gini by formula in presentaiton
+Gini <- 2*(roc_score$auc-0.5)
+
+# gini value
+print(Gini)
+ 
+plot(roc_score, main ="ROC curve -- Logistic Regression ")
+mtext(paste("AUC=", round(roc_score$auc, 2), " GINI=", round(Gini, 2)))
+```
+
+```{r scorecard}
+# calculating scorecard
+card <- scorecard(bins_final, model, points0 = 225, odds0 = 1/500, pdo = 25)
+
+# create table of scores,probabilities etc...
+df_scorecard <- data.frame(card[[2]])
+for (i in 3:length(card)){
+  df_scorecard <- rbind(df_scorecard, card[[i]])
+}
+
+df_scorecard %>% 
+  select(variable, bin, points, woe, posprob, count_distr) %>% 
+  mutate(woe = round(woe, 3),
+         posprob = paste (round(posprob * 100,2),'%', sep = ' '),
+         count_distr = paste (round(count_distr * 100,2),'%', sep = ' ')) %>%
+         kable(align = c('l','r','r','r','r','r'))
+
+# dataframe for final calculation and ploting
+df_score <- cbind(df_test %>% select(id), scorecard_ply(df_test, card))
+df_score <- left_join(df_score, test, by = "id") %>%  mutate(group = ifelse(TARGET == 1, "default", "payoff"))
+
+# setting breakpoint: eg. less than 45 → risky client, 45 and more → okay client
+breakpoint <- 45
+ggplot(df_score, aes(x = score, fill = group)) +
+  geom_histogram(binwidth = 10) + 
+  geom_vline(xintercept = breakpoint)
+
+# in okay clients are 7.88 % clients that will default in 12 months
+df_score %>%  filter(score >= breakpoint) %>% group_by(TARGET) %>%  summarise (n = n()) %>% mutate(rel = n/sum(n))
+# in risky clients are 33.86 % clients that will default in 12 months
+df_score %>%  filter(score < breakpoint) %>% group_by(TARGET) %>%  summarise (n = n())  %>% mutate(rel = n/sum(n))
+
+```
+
