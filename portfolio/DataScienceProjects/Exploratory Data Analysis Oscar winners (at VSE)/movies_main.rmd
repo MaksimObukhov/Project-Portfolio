@@ -1,0 +1,540 @@
+---
+title: "Maksim, Gleb, movies dataset"
+output: html_document
+---
+
+```{r Libraries, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(mice)
+library(simputation)
+library(stringr)
+library(lubridate)
+library(GGally)
+library(corrplot)
+library(caret)
+
+options(scipen = 999)
+```
+```{r Import}
+data_raw <- read.csv("movies.csv")
+df <- data_raw
+
+
+summary(df)
+str(df)
+```
+```{r NA check}
+#df$low_name <- gsub(" ", "", tolower(df$name))
+#df <- df %>%
+        #group_by(low_name) %>% # group by film low_name
+        #mutate(film_id = group_indices()) %>%
+        #select(film_id, everything())
+
+df <- data.frame(lapply(df, function(x) ifelse(x == "", NA, x))) # there are empty strings, convert them into NA values
+colSums(is.na(df))
+
+```
+
+
+```{r Data Preprocessing}
+# released split, into released_date and released_country
+df <- separate(df, col = released, into = c("released_date", "released_country"), sep = " \\(|\\)")
+df$released_country <- gsub("\\)", "", df$released_country)
+df$released_date <- parse_date(df$released_date, "%B %d, %Y", locale = locale("en"))
+
+# Convert released_date to Date format
+df$released_date <- ymd(df$released_date)
+
+# Extract month and day of week from released_date
+df$released_month <- month(df$released_date, label = TRUE)
+df$released_day_of_week <- wday(df$released_date, label = TRUE)
+colSums(is.na(df))
+```
+
+```{r}
+# to factor
+cat_columns <- c('rating', 'genre', 'director', 'released_country', 'writer',
+                 'star', 'country', 'company', 'released_month', 'released_day_of_week')
+df[, cat_columns] <- lapply(df[, cat_columns], factor)
+levels(df$rating)
+```
+
+```{r NA Part 1}
+df <- select(df, -name)
+df_NA_edited <- df %>% 
+  filter(!is.na(released_country) & !is.na(released_day_of_week) & !is.na(writer)
+         & !is.na(rating) & !is.na(star) & !is.na(country) & !is.na(company))
+colSums(is.na(df_NA_edited))
+is.character(df)
+```
+
+```{r NA part 2}
+hist(df_NA_edited$runtime)
+hist(df_NA_edited$score)
+hist(df_NA_edited$votes)
+hist(df_NA_edited$budget)
+
+df_NA_edited$runtime <- replace_na(df_NA_edited$runtime, median(df_NA_edited$runtime, na.rm = TRUE))
+df_NA_edited$score <- replace_na(df_NA_edited$score, median(df_NA_edited$score, na.rm = TRUE))
+df_NA_edited$votes <- replace_na(df_NA_edited$votes, median(df_NA_edited$votes, na.rm = TRUE))
+colSums(is.na(df_NA_edited))
+
+
+
+df_edited_numeric <- select_if(df_NA_edited, is.numeric)
+
+
+
+lm(gross ~ year + score + votes + budget + runtime, data = df_edited_numeric)
+
+for(i in 1:nrow(df_edited_numeric)) {
+  if(sum(is.na(df_edited_numeric$budget)) > 0) {
+   df_edited_numeric$budget[is.na(df_edited_numeric$budget)] = -1034835736.8238 +  527018.0916 * df_edited_numeric$year[i] - 7258515.9445 * df_edited_numeric$score[i] + 0.7025 * df_edited_numeric$votes[i] + 0.1525 * df_edited_numeric$gross[i] + 430236.2408 * df_edited_numeric$runtime[i]
+  }
+}
+
+for(i in 1:nrow(df_edited_numeric)) {
+  if(sum(is.na(df_edited_numeric$gross)) > 0) {
+   df_edited_numeric$gross[is.na(df_edited_numeric$gross)] = -291403486.515 +   134473.111 * df_edited_numeric$year[i] - 2972433.960 * df_edited_numeric$score[i] + 363.632 * df_edited_numeric$votes[i] + 2.683 * df_edited_numeric$budget[i] -321159.949 * df_edited_numeric$runtime[i]
+  }
+}
+
+df_edited_numeric
+summary(df_edited_numeric)
+
+
+df_NA_edited[, c(12, 13)] <- df_edited_numeric[,c(4,5) ]
+
+```
+
+```{r First quick observe}
+pairs <- c('rating', 'genre', 'score', 'votes', 'budget',
+           'gross',  'runtime')
+
+df_pairs <- df[, pairs]
+
+ggpairs(df_pairs, cardinality_threshold = 20) +
+  labs(title = "First observation without outlier treatment")
+
+# remain high profit
+df_pairs <- df_pairs %>%
+  filter(runtime <= 210) %>%
+  filter(gross >= median(gross, na.rm = TRUE)) %>%
+  filter(score >= 6) %>%
+  filter(genre %in% c('Action', 'Comedy', 'Animation', 'Drama', 'Adventure')) %>%
+  filter(rating %in% c("G", "NC-17", "PG", "PG-13", "R"))
+#As we want to observe high profit films, we cannot use IQR nor 5th and 95th percentile range
+
+ggpairs(df_pairs, cardinality_threshold = 20) +
+  labs(title = "High profit and score films")
+# outliers: runtime
+```
+
+
+```{r Before outlier treatment}
+movies <- df
+fill_color <- "dodgerblue2"
+
+ggplot(movies, aes(x = budget)) +
+  geom_histogram(fill = fill_color, bins = 100) +
+  labs(title = "Histogram of Movie Budgets", x = "Budget", y = "Frequency") +
+  theme_minimal()
+
+movies %>%
+  count(company, sort = TRUE) %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(company, n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Top 10 Production Companies by Number of Movies", x = "Production Company", y = "Number of Movies") +
+  theme_minimal() +
+  coord_flip()
+
+movies %>%
+  count(country, sort = TRUE) %>%
+  ggplot(aes(x = reorder(country, n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Country", x = "Country", y = "Number of Movies") +
+  theme_minimal() +
+  coord_flip()
+
+movies %>%
+  count(director, sort = TRUE) %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(director, n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Top 10 Directors by Number of Movies", x = "Director", y = "Number of Movies") +
+  theme_minimal() +
+  coord_flip()
+
+movies %>%
+  count(genre, sort = TRUE) %>%
+  ggplot(aes(x = reorder(genre, -n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Genre", x = "Genre", y = "Number of Movies") +
+  theme_minimal()
+
+movies %>%
+  group_by(genre, gross) %>%
+  ggplot(aes(x = reorder(genre, -gross), y = gross)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Genre by Gross", x = "Genre", y = "Gross") +
+  theme_minimal()
+
+ggplot(movies, aes(x = gross)) +
+  geom_histogram(fill = fill_color) +
+  labs(title = "Histogram of Movie Gross", x = "Gross)", y = "Frequency") +
+  theme_minimal()
+
+movies %>%
+  count(rating, sort = TRUE) %>%
+  ggplot(aes(x = reorder(rating, -n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Rating", x = "Rating", y = "Number of Movies") +
+  theme_minimal()
+
+movies %>%
+  count(released_month, sort = TRUE) %>%
+  ggplot(aes(x = reorder(factor(released_month), -n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Release Month", x = "Release Month", y = "Number of Movies") +
+  theme_minimal()
+
+movies %>%
+  count(released_day_of_week, sort = TRUE) %>%
+  ggplot(aes(x = reorder(released_day_of_week, -n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Release Day of the Week", x = "Release Day of the Week", y = "Number of Movies") +
+  theme_minimal()
+
+movies %>%
+  count(released_country, sort = TRUE) %>%
+  ggplot(aes(x = reorder(released_country, n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Release Country", x = "Release Country", y = "Number of Movies") +
+  theme_minimal() +
+  coord_flip()
+
+ggplot(movies, aes(x = runtime)) +
+  geom_histogram(fill = fill_color) +
+  labs(title = "Histogram of Movie Runtime", x = "Runtime (Minutes)", y = "Frequency") +
+  theme_minimal()
+
+ggplot(movies, aes(x = score)) +
+  geom_histogram(fill = fill_color) +
+  labs(title = "Histogram of IMDb User Ratings", x = "IMDb User Rating (Score)", y = "Frequency") +
+  theme_minimal()
+
+ggplot(movies, aes(x = votes)) +
+  geom_histogram(fill = fill_color) +
+  labs(title = "Histogram of Number of User Votes", x = "Number of User Votes", y = "Frequency") +
+  theme_minimal()
+
+movies %>%
+  count(star, sort = TRUE) %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(star, n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Top 10 Main Actors/Actresses by Number of Movies", x = "Main Actor/Actress", y = "Number of Movies") +
+  theme_minimal() +
+  coord_flip()
+
+movies %>%
+  count(writer, sort = TRUE) %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(writer, n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Top 10 Writers by Number of Movies", x = "Writer", y = "Number of Movies") +
+  theme_minimal() +
+  coord_flip()
+
+movies %>%
+  count(year, sort = TRUE) %>%
+  ggplot(aes(x = year, y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Year", x = "Year", y = "Number of Movies") +
+  theme_minimal()
+
+movies %>%
+  filter(rating %in% c("G", "NC-17", "PG", "PG-13", "R")) %>%
+  group_by(rating, genre) %>%
+  summarise(count = n()) %>%
+  ggplot(aes(x = rating, y = count, fill = genre)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Count of Genre by Rating", x = "Rating", y = "Count", fill = "Genre")
+# by gross: Action, Comedy, Animation, Drama, Adventure
+```
+```{r After outlier treatment}
+movies <- df %>%
+  filter(runtime <= 210) %>%
+  filter(score >= 6) %>%
+  filter(genre %in% c('Action', 'Comedy', 'Animation', 'Drama', 'Adventure')) %>%
+  filter(rating %in% c("G", "NC-17", "PG", "PG-13", "R"))
+
+fill_color <- "dodgerblue2"
+
+ggplot(movies, aes(x = budget)) +
+  geom_histogram(fill = fill_color, bins = 100) +
+  labs(title = "Histogram of Movie Budgets", x = "Budget", y = "Frequency") +
+  theme_minimal()
+
+movies %>%
+  count(company, sort = TRUE) %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(company, n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Top 10 Production Companies by Number of Movies", x = "Production Company", y = "Number of Movies") +
+  theme_minimal() +
+  coord_flip()
+
+movies %>%
+  count(country, sort = TRUE) %>%
+  ggplot(aes(x = reorder(country, n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Country", x = "Country", y = "Number of Movies") +
+  theme_minimal() +
+  coord_flip()
+
+movies %>%
+  count(director, sort = TRUE) %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(director, n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Top 10 Directors by Number of Movies", x = "Director", y = "Number of Movies") +
+  theme_minimal() +
+  coord_flip()
+
+movies %>%
+  count(genre, sort = TRUE) %>%
+  ggplot(aes(x = reorder(genre, -n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Genre", x = "Genre", y = "Number of Movies") +
+  theme_minimal()
+
+movies %>%
+  group_by(genre, gross) %>%
+  ggplot(aes(x = reorder(genre, -gross), y = gross)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Genre by Gross", x = "Genre", y = "Gross") +
+  theme_minimal()
+
+ggplot(movies, aes(x = gross)) +
+  geom_histogram(fill = fill_color) +
+  labs(title = "Histogram of Movie Gross", x = "Gross", y = "Frequency") +
+  theme_minimal()
+
+movies %>%
+  count(rating, sort = TRUE) %>%
+  ggplot(aes(x = reorder(rating, -n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Rating", x = "Rating", y = "Number of Movies") +
+  theme_minimal()
+
+movies %>%
+  count(released_month, sort = TRUE) %>%
+  ggplot(aes(x = reorder(factor(released_month), -n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Release Month", x = "Release Month", y = "Number of Movies") +
+  theme_minimal()
+
+movies %>%
+  count(released_day_of_week, sort = TRUE) %>%
+  ggplot(aes(x = reorder(released_day_of_week, -n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Release Day of the Week", x = "Release Day of the Week", y = "Number of Movies") +
+  theme_minimal()
+
+movies %>%
+  count(released_country, sort = TRUE) %>%
+  ggplot(aes(x = reorder(released_country, n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Release Country", x = "Release Country", y = "Number of Movies") +
+  theme_minimal() +
+  coord_flip()
+
+ggplot(movies, aes(x = runtime)) +
+  geom_histogram(fill = fill_color) +
+  labs(title = "Histogram of Movie Runtime", x = "Runtime (Minutes)", y = "Frequency") +
+  theme_minimal()
+
+ggplot(movies, aes(x = score)) +
+  geom_histogram(fill = fill_color) +
+  labs(title = "Histogram of IMDb User Ratings", x = "IMDb User Rating (Score)", y = "Frequency") +
+  theme_minimal()
+
+ggplot(movies, aes(x = votes)) +
+  geom_histogram(fill = fill_color) +
+  labs(title = "Histogram of Number of User Votes", x = "Number of User Votes", y = "Frequency") +
+  theme_minimal()
+
+movies %>%
+  count(star, sort = TRUE) %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(star, n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Top 10 Main Actors/Actresses by Number of Movies", x = "Main Actor/Actress", y = "Number of Movies") +
+  theme_minimal() +
+  coord_flip()
+
+movies %>%
+  count(writer, sort = TRUE) %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(writer, n), y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Top 10 Writers by Number of Movies", x = "Writer", y = "Number of Movies") +
+  theme_minimal() +
+  coord_flip()
+
+movies %>%
+  count(year, sort = TRUE) %>%
+  ggplot(aes(x = year, y = n)) +
+  geom_bar(stat = "identity", fill = fill_color) +
+  labs(title = "Number of Movies by Year", x = "Year", y = "Number of Movies") +
+  theme_minimal()
+
+movies %>%
+  filter(rating %in% c("G", "NC-17", "PG", "PG-13", "R")) %>%
+  group_by(rating, genre) %>%
+  summarise(count = n()) %>%
+  ggplot(aes(x = rating, y = count, fill = genre)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Count of Genre by Rating", x = "Rating", y = "Count", fill = "Genre")
+# by gross: Action, Comedy, Animation, Drama, Adventure
+
+```
+
+```{r outliers handling}
+boxplot(df_edited_numeric$budget, horizontal=TRUE)
+outliers_budget <- boxplot.stats(df_edited_numeric$budget)$out
+
+boxplot(df_edited_numeric$gross, horizontal=TRUE)
+outliers_gross <- boxplot.stats(df_edited_numeric$gross)$out
+
+boxplot(df_edited_numeric$score, horizontal=TRUE)
+outliers_score <- boxplot.stats(df_edited_numeric$score)$out
+
+boxplot(df_edited_numeric$runtime, horizontal=TRUE)
+outliers_runtime <- boxplot.stats(df_edited_numeric$runtime)$out
+
+boxplot(df_edited_numeric$votes, horizontal=TRUE)
+outliers_votes <- boxplot.stats(df_edited_numeric$votes)$out
+
+#all variables have outliers, score has lowest amount of outliers.
+
+#testing numerically for outliers in budget (IQR method)
+Q1_budget = quantile(df_edited_numeric$budget, 0.25)
+Q3_budget = quantile(df_edited_numeric$budget, 0.75)
+IQR_budget = Q3_budget - Q1_budget 
+lower_bound_budget = Q1_budget - 1.5 * IQR_budget
+upper_bound_budget = Q3_budget + 1.5 * IQR_budget
+outliers_budget = df_edited_numeric$budget[df_edited_numeric$budget < lower_bound_budget | df_edited_numeric$budget > upper_bound_budget]
+
+#testing numerically for outliers in score - close to normal distribution (Z-score method)
+z_scores_SCORE <- (df_edited_numeric$score - mean(df_edited_numeric$score) / sd(df_edited_numeric$score))
+#abs(z_scores_SCORE)
+outliers_score_zscores <- df_edited_numeric$score[abs(z_scores_SCORE) > 2]
+outliers_score_zscores
+```
+
+```{r normalization}
+#NORMALIZATION WILL BE TESTED ON df_edited_numeric OBJECT.
+
+df_edited_numeric <- df_edited_numeric[, -c(7, 8)]
+cor(df_edited_numeric)
+corrplot(cor(df_edited_numeric), method = "circle")
+
+#checking for linearity/heteroskedascity
+
+df_edited_numeric %>% 
+  ggplot(aes(x = budget, y = gross)) +
+           geom_point()
+#gross increasing rapidly with budget increases
+
+
+
+#testing for normalization(Null hypothesis: variable is normally distributed)
+ks.test(df_edited_numeric$budget, "pnorm", mean(df_edited_numeric$budget), sd(df_edited_numeric$budget))
+ks.test(df_edited_numeric$gross, "pnorm", mean(df_edited_numeric$gross), sd(df_edited_numeric$gross))
+ks.test(df_edited_numeric$votes, "pnorm", mean(df_edited_numeric$votes), sd(df_edited_numeric$votes))
+ks.test(df_edited_numeric$score, "pnorm", mean(df_edited_numeric$score), sd(df_edited_numeric$score))
+ks.test(df_edited_numeric$runtime, "pnorm", mean(df_edited_numeric$runtime), sd(df_edited_numeric$runtime))
+
+#pure graphs
+hist(df_edited_numeric$budget)
+hist(df_edited_numeric$score)
+hist(df_edited_numeric$gross)
+hist(df_edited_numeric$votes)
+hist(df_edited_numeric$runtime)
+
+
+#normalized graphs
+hist(log(df_edited_numeric$budget))
+hist(sqrt(max(df_edited_numeric$score + 1) - df_edited_numeric$score))
+hist(log(df_edited_numeric$gross))
+hist(log(df_edited_numeric$votes))
+hist(log(df_edited_numeric$runtime))
+
+#KS test with normalized data, checking if normalization is working:
+ks.test(log(df_edited_numeric$budget), "pnorm", mean(log(df_edited_numeric$budget)), sd(log(df_edited_numeric$budget)))
+ks.test(log(df_edited_numeric$gross), "pnorm", mean(log(df_edited_numeric$gross)), sd(log(df_edited_numeric$gross)))
+ks.test(log(df_edited_numeric$votes), "pnorm", mean(log(df_edited_numeric$votes)), sd(log(df_edited_numeric$votes)))
+ks.test(sqrt(max(df_edited_numeric$score + 1) - df_edited_numeric$score), "pnorm", mean(sqrt(max(df_edited_numeric$score + 1) - df_edited_numeric$score)), sd(sqrt(max(df_edited_numeric$score + 1) - df_edited_numeric$score))) 
+ks.test(log(df_edited_numeric$score), "pnorm", mean(log(df_edited_numeric$score)), sd(log(df_edited_numeric$score)))
+ks.test(log(df_edited_numeric$runtime), "pnorm", mean(log(df_edited_numeric$runtime)), sd(log(df_edited_numeric$runtime)))
+```
+
+
+## Conclusion of analysis:
+
+* Graphs ≥ median(netprofit) similar to Chi-squared distribution
+
+* Most of the films are low-budget and their Gross don't exceed 200 million dollars. Outliers in RunTime 
+  were detected and then were deleted. Especially, films with RunTime > 210 minutes, don't have any 
+  significant impact on netprofit of film. 
+
+* RunTime is close to Normal distribution, but Right-Skewed.
+
+* Histogram of film ratings(rating) convinced us, that outliers are: 
+    Approved, Not Rated, TV-14, TV-MA, TV-PG, Unrated, X - they don't have much films shooted. 
+
+
+* These categories of rating are in regular use: "G", "NC-17", "PG", "PG-13", "R”.
+
+* Rating R reaches more Gross, comparing with other ratings. 
+
+* Score almost corresponds to the Normal distribution.
+
+* The most popular genres by amount of shooted films: Comedy, Action, Drama and so on....
+
+* But by the Gross amount, leaders are Action, Comedy and Animation. Action by approx 2.5 times bigger than     Comedy.
+
+* Interesting relation between Score and Budget (in the Triangle form). Score < 6.5 = Budget is increasing,
+  Score >= 6.5 = Budget is decreasing.
+
+* Higher the Score, Higher the Gross.  
+
+
+
+* The way, how films were filtered: 
+
+  movies <- df %>%
+  filter(runtime <= 210) %>%
+  filter(net_profit >= 250 * 1e6) %>%
+  filter(score >= 6) %>%
+  filter(genre %in% c('Action', 'Comedy', 'Animation', 'Drama', 'Adventure'))
+
+  After this filtration, films of genre Action take first place - having the biggest Gross. Second place        reached by Animation and so on...
+  
+## NA HANDLING: 
+* Instances, which variables  were categorical, but had low amount of NA's was simply deleted.
+* Numerical variables, that had NA's but was skewed(right-skewed), these NA's were changed to medians due to skewness and low amount of NA's
+* Numerical variables (gross and budget). Their NA's were changed to predicted values, what provided linear regression, code is above.
+
+## OUTLIERS:
+* Boxplots were created for each variable
+* Numerically data was tested with IQR method, comparing to boxplot outputs, numerical method covered less outliers. 
+* Z-score method was used for score (more closely to Normal distributed, preciesly, almost normally distributed)
+## NORMALIZATION:
+* Largest level of deviation from normallity was with variables: budget, gross, votes (tested with Kolmogorov-Smirnov test)
+* For votes was used sqrt transformation, log transformation for other variables
+* Results of nomralization were tested with Kolmogorov-Smirnov test with similar setup, D-coefficient was significantly smaller than ealier in all cases,it means that normalization for all variables was effective.
+
